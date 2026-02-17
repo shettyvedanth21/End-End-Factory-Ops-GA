@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
+
   # -------------------- Infrastructure Services --------------------
 
-  # MySQL - Transactional DB for all services
   mysql:
     image: mysql:8.0
     container_name: mysql
@@ -22,7 +22,6 @@ services:
       timeout: 20s
       retries: 10
 
-  # InfluxDB - Time Series DB for Telemetry & Analytics
   influxdb:
     image: influxdb:2.7
     container_name: influxdb
@@ -37,8 +36,12 @@ services:
       - "8086:8086"
     volumes:
       - influxdb_data:/var/lib/influxdb2
+    healthcheck:
+      test: "curl -f http://localhost:8086/health || exit 1"
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # Redis - Message Queue & Cache
   redis:
     image: redis:7.0-alpine
     container_name: redis
@@ -46,8 +49,12 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # MinIO - Object Storage (Models, Reports, Datasets)
   minio:
     image: minio/minio:RELEASE.2024-01-18T22-51-28Z
     container_name: minio
@@ -60,22 +67,30 @@ services:
       - "9090:9090"
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: [ "CMD-SHELL", "sh -c 'echo > /dev/tcp/127.0.0.1/9000' || exit 1" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
-  # EMQX - MQTT Broker (Telemetry Ingestion)
   emqx:
     image: emqx/emqx:5.3.0
     container_name: emqx
     ports:
-      - "1883:1883" # MQTT
-      - "8083:8083" # MQTT over WebSocket
-      - "8084:8084" # MQTT over WSS
-      - "8883:8883" # MQTT over SSL
-      - "18083:18083" # Dashboard
+      - "1883:1883"
+      - "8083:8083"
+      - "8084:8084"
+      - "8883:8883"
+      - "18083:18083"
     environment:
       - EMQX_DASHBOARD__DEFAULT_USER__PASSWORD=public
-      - EMQX_ALLOW_ANONYMOUS=true # For dev simplicity; lock down in prod
+      - EMQX_ALLOW_ANONYMOUS=true
+    healthcheck:
+      test: [ "CMD", "emqx", "ctl", "status" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
-  # Nginx - Reverse Proxy
   nginx:
     image: nginx:latest
     container_name: nginx
@@ -84,13 +99,9 @@ services:
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - mysql
-      - influxdb
-      - redis
-      - minio
-      - emqx
+      - api-service
+      - frontend
 
-  # Grafana - Visualization (Optional but useful for verification)
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
@@ -100,6 +111,147 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     depends_on:
       - influxdb
+
+  # -------------------- Application Services --------------------
+
+  api-service:
+    build: ./api-service
+    container_name: api-service
+    ports:
+      - "8000:8000"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_DB=factoryops
+      - MYSQL_USER=factoryops_user
+      - MYSQL_PASSWORD=factoryops_password
+      - REDIS_URL=redis://redis:6379/0
+      - INFLUX_URL=http://influxdb:8086
+      - MQTT_BROKER_HOST=emqx
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  telemetry-service:
+    build: ./telemetry-service
+    container_name: telemetry-service
+    ports:
+      - "8001:8001"
+    environment:
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_ORG=factoryops
+      - INFLUX_BUCKET=factoryops
+      - INFLUX_TOKEN=factoryops_admin_token
+      - MQTT_BROKER_HOST=emqx
+      - MQTT_BROKER_PORT=1883
+      - REDIS_URL=redis://redis:6379/0
+      - MYSQL_HOST=mysql
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  rule-engine-service:
+    build: ./rule-engine-service
+    container_name: rule-engine-service
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MYSQL_HOST=mysql
+      - MYSQL_DB=factoryops
+      - MYSQL_USER=factoryops_user
+      - MYSQL_PASSWORD=factoryops_password
+      - MQTT_BROKER_HOST=emqx
+    depends_on:
+      redis:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+
+  analytics-service:
+    build: ./analytics-service
+    container_name: analytics-service
+    ports:
+      - "8003:8003"
+    environment:
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_ORG=factoryops
+      - INFLUX_BUCKET=factoryops
+      - INFLUX_TOKEN=factoryops_admin_token
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio_access_key
+      - MINIO_SECRET_KEY=minio_secret_key
+      - MYSQL_HOST=mysql
+      - MYSQL_DB=factoryops
+      - MYSQL_USER=factoryops_user
+      - MYSQL_PASSWORD=factoryops_password
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+
+  reporting-service:
+    build: ./reporting-service
+    container_name: reporting-service
+    ports:
+      - "8004:8004"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_DB=factoryops
+      - MYSQL_USER=factoryops_user
+      - MYSQL_PASSWORD=factoryops_password
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_ORG=factoryops
+      - INFLUX_BUCKET=factoryops
+      - INFLUX_TOKEN=factoryops_admin_token
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio_access_key
+      - MINIO_SECRET_KEY=minio_secret_key
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  notification-service:
+    build: ./notification-service
+    container_name: notification-service
+    ports:
+      - "8005:8005"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_DB=factoryops
+      - MYSQL_USER=factoryops_user
+      - MYSQL_PASSWORD=factoryops_password
+      - REDIS_URL=redis://redis:6379/0
+      # SMTP/Twilio credentials would also go here or in .env
+    depends_on:
+      redis:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: frontend
+    ports:
+      - "5173:80"
+    environment:
+      - VITE_API_URL=http://localhost:8000/api/v1
+      # Needs to be public facing URL for browser
+    depends_on:
+      - api-service
 
 volumes:
   mysql_data:

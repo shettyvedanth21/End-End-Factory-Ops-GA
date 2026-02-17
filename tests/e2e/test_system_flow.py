@@ -53,8 +53,8 @@ def api_client():
 def test_01_setup_infrastructure():
     """Ensure services are responsive (Health Checks)"""
     services = [
-        "http://localhost:8000/api/v1/health",   # API
-        "http://localhost:8001/health",          # Telemetry (check port if mapped, assumed 8001)
+        "http://localhost:8000/health",          # API (Main URL, no prefix for health check)
+        "http://localhost:8001/health",          # Telemetry
         "http://localhost:8002/health",          # Rule Engine
         "http://localhost:8003/health",          # Analytics
         "http://localhost:8004/health",          # Reporting
